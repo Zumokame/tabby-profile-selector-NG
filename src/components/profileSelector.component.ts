@@ -52,12 +52,32 @@ import { exec } from 'child_process'
             border: 2px solid rgba(255, 255, 255, 0.4);
             box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
             cursor: pointer;
+            position: relative;
         }
 
         .status-unknown { background-color: #8c8c8c; }
         .status-testing { background-color: #f59e0b; }
         .status-down { background-color: #ef4444; }
         .status-up { background-color: #22c55e; }
+        .status-disabled { opacity: 0.65; }
+        .status-disabled::after {
+            content: '';
+            position: absolute;
+            width: 18px;
+            height: 2px;
+            background: rgba(255, 255, 255, 0.8);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) rotate(45deg);
+        }
+
+        .status-latency {
+            font-size: 10px;
+            opacity: 0.7;
+            margin-right: 6px;
+            min-width: 36px;
+            text-align: right;
+        }
     `]
 })
 export class ProfileSelectorComponent extends BaseTabComponent implements OnInit {
@@ -89,6 +109,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     pingIntervalMs = 60000
     pingTimeoutMs = 2000
     pingEnabled: { [key: string]: boolean } = {}
+    pingLatencyMs: { [key: string]: number | null } = {}
 
     #groupOrder(g: string): string {
         if (g === 'Recent') return '0000'
@@ -295,7 +316,15 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         }
     }
 
-    selectProfile(profile: PartialProfile<Profile>) {
+    selectProfile(profile: PartialProfile<Profile>, event?: MouseEvent) {
+        if (event) {
+            const target = event.target as HTMLElement | null
+            if (target && target.closest('.status-dot')) {
+                event.preventDefault()
+                event.stopPropagation()
+                return
+            }
+        }
         this.profilesService.launchProfile(profile)
         this.destroy()
     }
@@ -544,8 +573,17 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
 
     getStatusClass(profile: PartialProfile<Profile>): string {
         const key = this.#profileKey(profile)
-        const status = this.pingEnabled[key] === false ? 'unknown' : (this.pingStatus[key] ?? 'unknown')
-        return `status-${status}`
+        const disabled = this.pingEnabled[key] === false
+        const status = disabled ? 'unknown' : (this.pingStatus[key] ?? 'unknown')
+        return `status-${status} ${disabled ? 'status-disabled' : ''}`
+    }
+
+    getPingLabel(profile: PartialProfile<Profile>): string {
+        const key = this.#profileKey(profile)
+        if (this.pingEnabled[key] === false) return ''
+        const latency = this.pingLatencyMs[key]
+        if (latency == null) return ''
+        return `${latency} ms`
     }
 
     togglePing(profile: PartialProfile<Profile>, event?: MouseEvent) {
@@ -561,6 +599,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
             this.#schedulePing(profile)
         } else {
             this.pingStatus[key] = 'unknown'
+            this.pingLatencyMs[key] = null
             if (this.pingTimers[key]) {
                 clearInterval(this.pingTimers[key])
                 delete this.pingTimers[key]
@@ -575,6 +614,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         this.pingTimers = {}
         this.pingStatus = {}
         this.pingEnabled = {}
+        this.pingLatencyMs = {}
     }
 
     #schedulePing(profile: PartialProfile<Profile>) {
@@ -592,8 +632,10 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         const run = async () => {
             if (this.pingEnabled[key] === false) return
             this.pingStatus[key] = 'testing'
-            const ok = await this.#pingHost(host)
-            this.pingStatus[key] = ok ? 'up' : 'down'
+            this.pingLatencyMs[key] = null
+            const result = await this.#pingHost(host)
+            this.pingStatus[key] = result.ok ? 'up' : 'down'
+            this.pingLatencyMs[key] = result.ok ? result.timeMs : null
         }
 
         void run()
@@ -602,7 +644,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         }
     }
 
-    #pingHost(host: string): Promise<boolean> {
+    #pingHost(host: string): Promise<{ ok: boolean, timeMs: number | null }> {
         return new Promise((resolve) => {
             const isWin = typeof process !== 'undefined' && process.platform === 'win32'
             const timeoutMs = Math.max(1000, this.pingTimeoutMs)
@@ -611,8 +653,11 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
                 ? `ping -n 1 -w ${timeoutMs} ${host}`
                 : `ping -c 1 -W ${timeoutSec} ${host}`
 
-            exec(cmd, { windowsHide: true }, (error) => {
-                resolve(!error)
+            exec(cmd, { windowsHide: true }, (error, stdout) => {
+                const out = String(stdout ?? '')
+                const match = out.match(/(?:time|temps)[=<]\s*(\d+(?:[.,]\d+)?)\s*ms/i)
+                const timeMs = match ? Math.round(parseFloat(match[1].replace(',', '.'))) : null
+                resolve({ ok: !error, timeMs })
             })
         })
     }
