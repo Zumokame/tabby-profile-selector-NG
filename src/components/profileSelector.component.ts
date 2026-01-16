@@ -1,5 +1,5 @@
-import { Component, Injector, OnInit, Input } from '@angular/core'
-import { BaseTabComponent, ConfigService, ProfilesService, PartialProfile, Profile } from 'tabby-core'
+import { Component, Injector, OnInit, Input, HostListener } from '@angular/core'
+import { BaseTabComponent, ConfigService, ProfilesService, PartialProfile, Profile, HostAppService, SelectorService, PlatformService, TranslateService, ProfileProvider } from 'tabby-core'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 declare const require: any
 import FuzzySearch from 'fuzzy-search'
@@ -106,6 +106,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     @Input() search: string = '';
     groups: string[] = [];
     groupedProfiles: { [group: string]: PartialProfile<Profile>[] } = {};
+    private injectorRef: Injector
 
     constructor(
         public config: ConfigService,
@@ -115,6 +116,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     ) {
         super(injector)
         this.icon = 'fas fa-grip'
+        this.injectorRef = injector
         this.title = 'Select Profile'
     }
 
@@ -360,6 +362,10 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
 
         try {
             const provider = this.profilesService.providerForProfile(profile)
+            if (!provider) {
+                console.error('[ProfileSelector] no provider for profile', profile)
+                return
+            }
             let pkg: any = {}
             try {
                 pkg = require('tabby-settings') || {}
@@ -367,23 +373,38 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
                 console.error('[ProfileSelector] error requiring tabby-settings', e)
                 pkg = {}
             }
+            const ProfilesSettingsTabComponent = this.#findProfilesSettingsTabComponent(pkg)
             const EditProfileModalComponent = pkg.EditProfileModalComponent || pkg.default?.EditProfileModalComponent || this.#findEditProfileModalComponent(pkg)
-            if (!EditProfileModalComponent) {
-                console.error('[ProfileSelector] EditProfileModalComponent not available from tabby-settings')
+            if (!ProfilesSettingsTabComponent && !EditProfileModalComponent) {
+                console.error('[ProfileSelector] EditProfileModalComponent and ProfilesSettingsTabComponent not available from tabby-settings')
                 return
             }
 
             // find original config profile object to apply changes into
             const original = this.findConfigProfile(profile)
             const targetProfile: any = original ?? profile
-            const clone = JSON.parse(JSON.stringify(targetProfile)) as any
+            let result: any = null
 
-            const modalRef = this.ngbModal.open(EditProfileModalComponent as any, { size: 'lg' })
-            modalRef.componentInstance.profile = clone
-            modalRef.componentInstance.profileProvider = provider
-            modalRef.componentInstance.settingsComponent = provider?.settingsComponent
-
-            const result = await modalRef.result
+            if (ProfilesSettingsTabComponent) {
+                const settingsTab = new ProfilesSettingsTabComponent(
+                    this.config,
+                    this.injectorRef.get(HostAppService),
+                    this.injectorRef.get(ProfileProvider),
+                    this.profilesService,
+                    this.injectorRef.get(SelectorService),
+                    this.ngbModal,
+                    this.injectorRef.get(PlatformService),
+                    this.injectorRef.get(TranslateService),
+                )
+                result = await settingsTab.showProfileEditModal(targetProfile)
+            } else {
+                const clone = JSON.parse(JSON.stringify(targetProfile)) as any
+                const modalRef = this.ngbModal.open(EditProfileModalComponent as any, { size: 'lg' })
+                modalRef.componentInstance.profile = clone
+                modalRef.componentInstance.profileProvider = provider
+                modalRef.componentInstance.settingsComponent = provider?.settingsComponent
+                result = await modalRef.result
+            }
             if (result) {
                 // fully replace target profile with result
                 const existingId = targetProfile?.id
@@ -438,6 +459,14 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         return null
     }
 
+    #findProfilesSettingsTabComponent(pkg: any): any {
+        if (pkg?.default?.ɵmod?.declarations && Array.isArray(pkg.default.ɵmod.declarations)) {
+            const decls = pkg.default.ɵmod.declarations
+            return decls.find((d: any) => (d?.name ?? '') === 'ProfilesSettingsTabComponent') ?? null
+        }
+        return null
+    }
+
     // find the corresponding profile object stored in config.store.profiles
     private findConfigProfile(profile: PartialProfile<Profile> | null): any {
         if (!profile) return null
@@ -481,6 +510,14 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         this.contextMenuVisible = true
     }
 
+    @HostListener('document:click', ['$event'])
+    onDocumentClick(event: MouseEvent) {
+        if (!this.contextMenuVisible) return
+        const target = event.target as HTMLElement | null
+        if (target && target.closest('.context-menu')) return
+        this.closeContextMenu()
+    }
+
     closeContextMenu() {
         this.contextMenuVisible = false
         this.contextMenuProfile = null
@@ -507,6 +544,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
             if (!Array.isArray(this.config.store.profiles)) this.config.store.profiles = []
             this.config.store.profiles.push(copy)
             await this.config.save()
+
             // refresh
             this.profiles = []
             await this.#initProfiles()
