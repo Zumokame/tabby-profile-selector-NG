@@ -13,6 +13,9 @@
                     <span class="selector-card_title h5 mb-0">{{ profile.name }}</span>
                     <p class="text-xs text-gray-600 mb-0">{{ profile.description }}</p>
                 </div>
+                <div class="ms-auto d-flex align-items-center">
+                    <span class="status-dot" [ngClass]="getStatusClass(profile)" (click)="togglePing(profile, $event)"></span>
+                </div>
             </a>
         </div>
     </div>

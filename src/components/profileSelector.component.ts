@@ -3,6 +3,7 @@ import { BaseTabComponent, ConfigService, ProfilesService, PartialProfile, Profi
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 declare const require: any
 import FuzzySearch from 'fuzzy-search'
+import { exec } from 'child_process'
 
 // type nestedGroup = {
 //     name: string | null,
@@ -42,6 +43,21 @@ import FuzzySearch from 'fuzzy-search'
             white-space: nowrap;
 
         }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+            cursor: pointer;
+        }
+
+        .status-unknown { background-color: #8c8c8c; }
+        .status-testing { background-color: #f59e0b; }
+        .status-down { background-color: #ef4444; }
+        .status-up { background-color: #22c55e; }
     `]
 })
 export class ProfileSelectorComponent extends BaseTabComponent implements OnInit {
@@ -66,6 +82,13 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     contextMenuX = 0
     contextMenuY = 0
     contextMenuProfile: PartialProfile<Profile> | null = null
+
+    // ping status state
+    pingStatus: { [key: string]: 'unknown' | 'testing' | 'up' | 'down' } = {}
+    pingTimers: { [key: string]: any } = {}
+    pingIntervalMs = 60000
+    pingTimeoutMs = 2000
+    pingEnabled: { [key: string]: boolean } = {}
 
     #groupOrder(g: string): string {
         if (g === 'Recent') return '0000'
@@ -264,6 +287,12 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
             counts[p.group!] = (counts[p.group!] || 0) + 1
         }
         console.log('[ProfileSelector] profiles loaded:', this.profiles.length, 'countsByGroup:', counts)
+
+        // start ping checks
+        this.#resetPingTimers()
+        for (const p of this.profiles) {
+            this.#schedulePing(p)
+        }
     }
 
     selectProfile(profile: PartialProfile<Profile>) {
@@ -293,18 +322,28 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
                 return
             }
 
-            // find original config profile object to pass into the editor (so proxy edits apply to real config)
+            // find original config profile object to apply changes into
             const original = this.findConfigProfile(profile)
             const targetProfile: any = original ?? profile
-            const proxyProfile = (this.profilesService as any).getConfigProxyForProfile ? (this.profilesService as any).getConfigProxyForProfile(targetProfile) : targetProfile
+            const clone = JSON.parse(JSON.stringify(targetProfile)) as any
 
-            const modalRef = this.ngbModal.open(EditProfileModalComponent as any)
-            modalRef.componentInstance.profile = proxyProfile
+            const modalRef = this.ngbModal.open(EditProfileModalComponent as any, { size: 'lg' })
+            modalRef.componentInstance.profile = clone
             modalRef.componentInstance.profileProvider = provider
             modalRef.componentInstance.settingsComponent = provider?.settingsComponent
 
             const result = await modalRef.result
             if (result) {
+                // fully replace target profile with result
+                const existingId = targetProfile?.id
+                for (const k in targetProfile) {
+                    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+                    delete targetProfile[k]
+                }
+                Object.assign(targetProfile, result)
+                if (existingId && !targetProfile.id) targetProfile.id = existingId
+                if (provider?.id) targetProfile.type = provider.id
+
                 try {
                     await this.config.save()
                 } catch (e) {
@@ -492,5 +531,89 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     async ngOnInit() {
         await this.#initProfiles()
         this.#doGroupProfiles(this.profiles)
+    }
+
+    #profileKey(profile: PartialProfile<Profile>): string {
+        return String((profile as any).id ?? `${profile.type ?? 'profile'}:${profile.name ?? 'unknown'}`)
+    }
+
+    #extractHost(profile: PartialProfile<Profile>): string | null {
+        const host = (profile as any).options?.host ?? (profile as any).host
+        return host ? String(host) : null
+    }
+
+    getStatusClass(profile: PartialProfile<Profile>): string {
+        const key = this.#profileKey(profile)
+        const status = this.pingEnabled[key] === false ? 'unknown' : (this.pingStatus[key] ?? 'unknown')
+        return `status-${status}`
+    }
+
+    togglePing(profile: PartialProfile<Profile>, event?: MouseEvent) {
+        if (event) {
+            event.preventDefault()
+            event.stopPropagation()
+        }
+        const key = this.#profileKey(profile)
+        const isEnabled = this.pingEnabled[key] !== false
+        this.pingEnabled[key] = !isEnabled
+
+        if (this.pingEnabled[key]) {
+            this.#schedulePing(profile)
+        } else {
+            this.pingStatus[key] = 'unknown'
+            if (this.pingTimers[key]) {
+                clearInterval(this.pingTimers[key])
+                delete this.pingTimers[key]
+            }
+        }
+    }
+
+    #resetPingTimers() {
+        for (const key of Object.keys(this.pingTimers)) {
+            clearInterval(this.pingTimers[key])
+        }
+        this.pingTimers = {}
+        this.pingStatus = {}
+        this.pingEnabled = {}
+    }
+
+    #schedulePing(profile: PartialProfile<Profile>) {
+        const host = this.#extractHost(profile)
+        const key = this.#profileKey(profile)
+        if (!host) {
+            this.pingStatus[key] = 'unknown'
+            return
+        }
+
+        if (this.pingEnabled[key] === false) {
+            return
+        }
+
+        const run = async () => {
+            if (this.pingEnabled[key] === false) return
+            this.pingStatus[key] = 'testing'
+            const ok = await this.#pingHost(host)
+            this.pingStatus[key] = ok ? 'up' : 'down'
+        }
+
+        void run()
+        if (!this.pingTimers[key]) {
+            this.pingTimers[key] = setInterval(run, this.pingIntervalMs)
+        }
+    }
+
+    #pingHost(host: string): Promise<boolean> {
+        return new Promise((resolve) => {
+            const isWin = typeof process !== 'undefined' && process.platform === 'win32'
+            const timeoutMs = Math.max(1000, this.pingTimeoutMs)
+            const timeoutSec = Math.ceil(timeoutMs / 1000)
+            const cmd = isWin
+                ? `ping -n 1 -w ${timeoutMs} ${host}`
+                : `ping -c 1 -W ${timeoutSec} ${host}`
+
+            exec(cmd, { windowsHide: true }, (error) => {
+                resolve(!error)
+            })
+        })
     }
 }
