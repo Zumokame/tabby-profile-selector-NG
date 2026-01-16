@@ -1,7 +1,7 @@
 import { Component, Injector, OnInit, Input } from '@angular/core'
 import { BaseTabComponent, ConfigService, ProfilesService, PartialProfile, Profile } from 'tabby-core'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
-import { EditProfileModalComponent } from 'tabby-settings'
+declare const require: any
 import FuzzySearch from 'fuzzy-search'
 
 // type nestedGroup = {
@@ -60,6 +60,12 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         this.icon = 'fas fa-grip'
         this.title = 'Select Profile'
     }
+
+    // context menu state
+    contextMenuVisible = false
+    contextMenuX = 0
+    contextMenuY = 0
+    contextMenuProfile: PartialProfile<Profile> | null = null
 
     #groupOrder(g: string): string {
         if (g === 'Recent') return '0000'
@@ -265,14 +271,35 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         this.destroy()
     }
 
-    async editProfile(profile: PartialProfile<Profile>, event: MouseEvent) {
-        event.preventDefault()
-        event.stopPropagation()
+    async editProfile(profile: PartialProfile<Profile> | null, event?: MouseEvent) {
+        if (event) {
+            event.preventDefault()
+            event.stopPropagation()
+        }
+        if (!profile) return
 
         try {
             const provider = this.profilesService.providerForProfile(profile)
+            let pkg: any = {}
+            try {
+                pkg = require('tabby-settings') || {}
+            } catch (e) {
+                console.error('[ProfileSelector] error requiring tabby-settings', e)
+                pkg = {}
+            }
+            const EditProfileModalComponent = pkg.EditProfileModalComponent || pkg.default?.EditProfileModalComponent || this.#findEditProfileModalComponent(pkg)
+            if (!EditProfileModalComponent) {
+                console.error('[ProfileSelector] EditProfileModalComponent not available from tabby-settings')
+                return
+            }
+
+            // find original config profile object to pass into the editor (so proxy edits apply to real config)
+            const original = this.findConfigProfile(profile)
+            const targetProfile: any = original ?? profile
+            const proxyProfile = (this.profilesService as any).getConfigProxyForProfile ? (this.profilesService as any).getConfigProxyForProfile(targetProfile) : targetProfile
+
             const modalRef = this.ngbModal.open(EditProfileModalComponent as any)
-            modalRef.componentInstance.profile = profile
+            modalRef.componentInstance.profile = proxyProfile
             modalRef.componentInstance.profileProvider = provider
             modalRef.componentInstance.settingsComponent = provider?.settingsComponent
 
@@ -291,6 +318,152 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
             }
         } catch (e) {
             // modal dismissed or error
+        }
+    }
+
+    #findEditProfileModalComponent(pkg: any): any {
+        const candidates: any[] = []
+        if (pkg && typeof pkg === 'object') {
+            candidates.push(...Object.values(pkg))
+        }
+
+        if (pkg?.default) {
+            candidates.push(pkg.default)
+            if (typeof pkg.default === 'object') {
+                candidates.push(...Object.values(pkg.default))
+            }
+            const decls = (pkg.default as any)?.ɵmod?.declarations
+            if (Array.isArray(decls)) {
+                candidates.push(...decls)
+            }
+        }
+
+        for (const c of candidates) {
+            const name = (c as any)?.name ?? ''
+            if (c && (c as any).ɵcmp && /edit.*profile|profile.*edit/i.test(name)) {
+                return c
+            }
+        }
+
+        return null
+    }
+
+    // find the corresponding profile object stored in config.store.profiles
+    private findConfigProfile(profile: PartialProfile<Profile> | null): any {
+        if (!profile) return null
+        const cfg = (this.config.store && Array.isArray(this.config.store.profiles)) ? this.config.store.profiles : []
+        // try by id
+        if ((profile as any).id) {
+            const found = cfg.find((p: any) => p.id === (profile as any).id)
+            if (found) return found
+        }
+
+        // try matching by name + host for ssh profiles
+        const name = (profile as any).name
+        const host = (profile as any).options?.host ?? (profile as any).host
+        for (const p of cfg) {
+            if (p.name === name) {
+                // if both have host, match host too
+                const phost = p.options?.host ?? p.host
+                if (host && phost && host === phost) return p
+                if (!host && !phost) return p
+            }
+        }
+
+        // fallback: try deep-equal by JSON
+        try {
+            const target = JSON.stringify(profile)
+            const found = cfg.find((p: any) => JSON.stringify(p) === target)
+            if (found) return found
+        } catch (e) {
+            // ignore
+        }
+
+        return null
+    }
+
+    openContextMenu(profile: PartialProfile<Profile>, event: MouseEvent) {
+        event.preventDefault()
+        event.stopPropagation()
+        this.contextMenuProfile = profile
+        this.contextMenuX = event.clientX
+        this.contextMenuY = event.clientY
+        this.contextMenuVisible = true
+    }
+
+    closeContextMenu() {
+        this.contextMenuVisible = false
+        this.contextMenuProfile = null
+    }
+
+    async triggerEdit() {
+        if (!this.contextMenuProfile) return
+        const profile = this.contextMenuProfile
+        this.closeContextMenu()
+        await this.editProfile(profile)
+    }
+
+    async triggerDuplicate() {
+        if (!this.contextMenuProfile) return
+        const profile = this.contextMenuProfile
+        this.closeContextMenu()
+        try {
+            // prefer duplicating the original config entry if available
+            const original = this.findConfigProfile(profile) ?? profile
+            const copy = JSON.parse(JSON.stringify(original)) as any
+            delete copy.id
+            copy.name = (copy.name ?? 'Profile') + ' copy'
+            // append to config
+            if (!Array.isArray(this.config.store.profiles)) this.config.store.profiles = []
+            this.config.store.profiles.push(copy)
+            await this.config.save()
+            // refresh
+            this.profiles = []
+            await this.#initProfiles()
+            this.#doGroupProfiles(this.profiles)
+        } catch (e) {
+            console.error('[ProfileSelector] error duplicating profile', e)
+        }
+    }
+
+    async triggerDelete() {
+        if (!this.contextMenuProfile) return
+        const profile = this.contextMenuProfile
+        this.closeContextMenu()
+        try {
+            // basic confirmation
+            if (!confirm(`Delete "${profile.name}"?`)) return
+
+            // locate original config profile
+            const original = this.findConfigProfile(profile)
+            if (original) {
+                // call provider delete hook if present
+                this.profilesService.providerForProfile(original)?.deleteProfile(this.profilesService.getConfigProxyForProfile(original))
+
+                // remove from config store by identity
+                this.config.store.profiles = (this.config.store.profiles || []).filter((p: any) => p !== original)
+            } else {
+                // fallback: try remove by matching id or name/host
+                const pList = this.config.store.profiles || []
+                this.config.store.profiles = pList.filter((p: any) => {
+                    if (profile.id && p.id === profile.id) return false
+                    if (p.name === profile.name) {
+                        const phost = p.options?.host ?? p.host
+                        const host = (profile as any).options?.host ?? (profile as any).host
+                        if (host && phost && host === phost) return false
+                        if (!host && !phost) return false
+                    }
+                    return true
+                })
+            }
+            await this.config.save()
+
+            // refresh
+            this.profiles = []
+            await this.#initProfiles()
+            this.#doGroupProfiles(this.profiles)
+        } catch (e) {
+            console.error('[ProfileSelector] error deleting profile', e)
         }
     }
 
