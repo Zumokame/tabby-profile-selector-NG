@@ -7,13 +7,21 @@
     <div *ngFor="let group of groups" class="mb-4">
         <h2 class="text-lg font-semibold mb-2">{{ group }}</h2>
         <div class="d-flex flex-row gap-3 flex-wrap">
-            <a *ngFor="let profile of groupedProfiles[group]" class="selector-card border border rounded-4 p-2 hover:shadow-lg transition-shadow pointer d-flex" [style.borderColor]="profile.borderColor" (click)="selectProfile(profile)" href="javascript:void(0)">
+            <a *ngFor="let profile of groupedProfiles[group]" class="selector-card border border rounded-4 p-2 hover:shadow-lg transition-shadow pointer d-flex" [style.borderColor]="profile.borderColor" (click)="selectProfile(profile)" (contextmenu)="openContextMenu(profile,$event)" href="javascript:void(0)">
                 <div class="selector-card_icon d-block rounded-3 me-2 d-flex align-items-center justify-content-center" [style.backgroundColor]="profile.color ?? 'var(--theme-primary-more)'" [fastHtmlBind]="profile.iconHtml"></div>
                 <div class="d-flex flex-column">
                     <span class="selector-card_title h5 mb-0">{{ profile.name }}</span>
                     <p class="text-xs text-gray-600 mb-0">{{ profile.description }}</p>
                 </div>
             </a>
+        </div>
+    </div>
+
+    <div *ngIf="contextMenuVisible" class="context-menu" (click)="closeContextMenu()" [ngStyle]="{ position: 'fixed', left: contextMenuX + 'px', top: contextMenuY + 'px', zIndex: 2000 }">
+        <div class="card p-2">
+            <button class="btn btn-link d-block text-start" (click)="$event.stopPropagation(); triggerEdit()">Edit</button>
+            <button class="btn btn-link d-block text-start" (click)="$event.stopPropagation(); triggerDuplicate()">Duplicate</button>
+            <button class="btn btn-link d-block text-start text-danger" (click)="$event.stopPropagation(); triggerDelete()">Delete</button>
         </div>
     </div>
 </div>

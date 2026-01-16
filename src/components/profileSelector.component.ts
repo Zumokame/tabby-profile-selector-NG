@@ -1,5 +1,7 @@
 import { Component, Injector, OnInit, Input } from '@angular/core'
 import { BaseTabComponent, ConfigService, ProfilesService, PartialProfile, Profile } from 'tabby-core'
+import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import { EditProfileModalComponent } from 'tabby-settings'
 import FuzzySearch from 'fuzzy-search'
 
 // type nestedGroup = {
@@ -51,6 +53,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     constructor(
         public config: ConfigService,
         public profilesService: ProfilesService,
+        private ngbModal: NgbModal,
         injector: Injector,
     ) {
         super(injector)
@@ -138,14 +141,37 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     }
 
     async #initProfiles() {
-        const profiles = await this.profilesService.getProfiles()
-        const recentProfiles = this.profilesService.getRecentProfiles().map(x => ({ ...x, group: 'Recent' }))
+            let profiles: PartialProfile<Profile>[] = []
+            let recentProfiles: PartialProfile<Profile>[] = []
+            try {
+                const p = await this.profilesService.getProfiles()
+                profiles = Array.isArray(p) ? p : []
+            } catch (e) {
+                console.error('[ProfileSelector] error getting profiles', e)
+                profiles = []
+            }
+
+            console.log('[ProfileSelector] config groups:', (this.config.store as any).groups)
+
+            try {
+                const r = this.profilesService.getRecentProfiles()
+                recentProfiles = Array.isArray(r) ? r.map(x => ({ ...x, group: 'Recent' })) : []
+            } catch (e) {
+                console.error('[ProfileSelector] error getting recent profiles', e)
+                recentProfiles = []
+            }
 
         // clean up profiles list
         for (const _profile of [...profiles, ...recentProfiles]) {
 
             // get selectorOptionForProfile to ensure it's valid
-            const option = this.profilesService.selectorOptionForProfile(_profile)
+            let option: any = {}
+            try {
+                option = this.profilesService.selectorOptionForProfile(_profile) || {}
+            } catch (e) {
+                console.error('[ProfileSelector] error getting selectorOptionForProfile', e, _profile)
+                option = {}
+            }
 
             const profile = {
                 ...option,
@@ -169,9 +195,37 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
                 profile.group = 'Built-in'
             }
 
-            // convert group uuids to names, if no group, set to 'Ungrouped'
+            // normalize group: support when group is an object, numeric id, or uuid -> convert to group name
             if (profile.group) {
-                profile.group = this.config.store.groups.find(g => g.id === profile.group)?.name ?? profile.group
+                // if group is an object like { id, name }
+                if (typeof profile.group === 'object') {
+                    profile.group = (profile.group as any).name ?? (profile.group as any).id ?? String(profile.group)
+                }
+
+                // ensure groups array exists
+                const cfgGroups = Array.isArray((this.config.store as any).groups) ? (this.config.store as any).groups : []
+
+                // try to find by id (loose), then by name (case-insensitive), then fallback to original string
+                let found = cfgGroups.find((g: any) => g.id == profile.group)
+                if (!found) {
+                    const target = String(profile.group).toLowerCase()
+                    found = cfgGroups.find((g: any) => String(g.name ?? '').toLowerCase() === target || String(g.id ?? '').toLowerCase() === target)
+                }
+
+                if (found) {
+                    profile.group = found.name ?? String(profile.group)
+                } else {
+                    // if nothing found, but the group value looks like a UUID, try to find by fuzzy/case-insensitive name
+                    const maybeName = String(profile.group)
+                    const byName = cfgGroups.find((g: any) => String(g.name ?? '').toLowerCase() === maybeName.toLowerCase())
+                    if (byName) {
+                        profile.group = byName.name
+                    } else {
+                        profile.group = String(profile.group)
+                    }
+                }
+
+                console.log('[ProfileSelector] mapped group for', profile.name, '->', profile.group, 'originalGroup:', _profile.group)
             } else {
                 profile.group = 'Ungrouped'
             }
@@ -187,8 +241,8 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         // remove template profiles
         this.profiles = this.profiles.filter(x => !x.isTemplate)
 
-        // remove blacklisted profiles
-        this.profiles = this.profiles.filter(x => x.id && !this.config.store.profileBlacklist.includes(x.id))
+        // remove blacklisted profiles (only remove if id exists and is blacklisted)
+        this.profiles = this.profiles.filter(x => !(x.id && this.config.store.profileBlacklist.includes(x.id)))
 
         // sort profiles by group (with special groups first) and name
         this.profiles.sort((a, b) => {
@@ -197,11 +251,47 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
             }
             return this.#groupOrder(a.group!).localeCompare(this.#groupOrder(b.group!))
         })
+
+        // diagnostic: count profiles per group
+        const counts: { [k: string]: number } = {}
+        for (const p of this.profiles) {
+            counts[p.group!] = (counts[p.group!] || 0) + 1
+        }
+        console.log('[ProfileSelector] profiles loaded:', this.profiles.length, 'countsByGroup:', counts)
     }
 
     selectProfile(profile: PartialProfile<Profile>) {
         this.profilesService.launchProfile(profile)
         this.destroy()
+    }
+
+    async editProfile(profile: PartialProfile<Profile>, event: MouseEvent) {
+        event.preventDefault()
+        event.stopPropagation()
+
+        try {
+            const provider = this.profilesService.providerForProfile(profile)
+            const modalRef = this.ngbModal.open(EditProfileModalComponent as any)
+            modalRef.componentInstance.profile = profile
+            modalRef.componentInstance.profileProvider = provider
+            modalRef.componentInstance.settingsComponent = provider?.settingsComponent
+
+            const result = await modalRef.result
+            if (result) {
+                try {
+                    await this.config.save()
+                } catch (e) {
+                    console.error('[ProfileSelector] error saving config after edit', e)
+                }
+
+                // refresh list
+                this.profiles = []
+                await this.#initProfiles()
+                this.#doGroupProfiles(this.profiles)
+            }
+        } catch (e) {
+            // modal dismissed or error
+        }
     }
 
     onSearchChange(): void {

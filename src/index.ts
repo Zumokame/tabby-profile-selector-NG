@@ -1,6 +1,7 @@
 import { NgModule } from '@angular/core'
 import { CommonModule } from '@angular/common'
 import { FormsModule } from '@angular/forms'
+import { NgbModule } from '@ng-bootstrap/ng-bootstrap'
 import FastHtmlBindDirective, { ProfilesService, ProfileProvider } from 'tabby-core'
 
 import { ProfilesServicesOverride } from './services/profiles.service'
@@ -11,7 +12,8 @@ import { ProfileSelectorProfilesService } from './profiles'
     imports: [
         CommonModule,
         FormsModule,
-        FormsModule
+        FormsModule,
+        NgbModule
     ],
     providers: [
         { provide: ProfilesService, useClass: ProfilesServicesOverride },
