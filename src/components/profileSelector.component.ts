@@ -22,6 +22,8 @@ import { exec } from 'child_process'
             transition: all 0.2s;
             text-decoration: none;
             color: inherit;
+            justify-content: flex-start;
+            gap: 8px;
         }
         .selector-card:hover {
             filter: brightness(1.2);
@@ -44,6 +46,11 @@ import { exec } from 'child_process'
 
         }
 
+        .selector-card_content {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
         .status-dot {
             width: 12px;
             height: 12px;
@@ -53,6 +60,7 @@ import { exec } from 'child_process'
             box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
             cursor: pointer;
             position: relative;
+            flex: 0 0 12px;
         }
 
         .status-unknown { background-color: #8c8c8c; }
@@ -63,7 +71,7 @@ import { exec } from 'child_process'
         .status-disabled::after {
             content: '';
             position: absolute;
-            width: 18px;
+            width: 16px;
             height: 2px;
             background: rgba(255, 255, 255, 0.8);
             top: 50%;
@@ -75,8 +83,21 @@ import { exec } from 'child_process'
             font-size: 10px;
             opacity: 0.7;
             margin-right: 6px;
-            min-width: 36px;
+            min-width: 40px;
             text-align: right;
+        }
+
+        .status-tile {
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 6px;
+            width: 64px;
+            flex: 0 0 64px;
+            padding: 4px 6px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
         }
     `]
 })
@@ -311,6 +332,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
 
         // start ping checks
         this.#resetPingTimers()
+        this.#loadPingPreferences()
         for (const p of this.profiles) {
             this.#schedulePing(p)
         }
@@ -563,7 +585,12 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     }
 
     #profileKey(profile: PartialProfile<Profile>): string {
-        return String((profile as any).id ?? `${profile.type ?? 'profile'}:${profile.name ?? 'unknown'}`)
+        const id = (profile as any).id
+        if (id) return String(id)
+        const name = (profile as any).name ?? 'unknown'
+        const host = (profile as any).options?.host ?? (profile as any).host ?? ''
+        const type = (profile as any).type ?? 'profile'
+        return `${type}:${name}:${host}`
     }
 
     #extractHost(profile: PartialProfile<Profile>): string | null {
@@ -581,8 +608,9 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
     getPingLabel(profile: PartialProfile<Profile>): string {
         const key = this.#profileKey(profile)
         if (this.pingEnabled[key] === false) return ''
+        if (this.pingStatus[key] === 'testing') return '...'
         const latency = this.pingLatencyMs[key]
-        if (latency == null) return ''
+        if (latency == null) return '—'
         return `${latency} ms`
     }
 
@@ -594,6 +622,8 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         const key = this.#profileKey(profile)
         const isEnabled = this.pingEnabled[key] !== false
         this.pingEnabled[key] = !isEnabled
+
+        this.#persistPingPreference(profile, this.pingEnabled[key])
 
         if (this.pingEnabled[key]) {
             this.#schedulePing(profile)
@@ -615,6 +645,44 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
         this.pingStatus = {}
         this.pingEnabled = {}
         this.pingLatencyMs = {}
+    }
+
+    #loadPingPreferences() {
+        const store = (this.config.store as any)
+        const prefs = store.profileSelectorPingEnabled
+        if (prefs && typeof prefs === 'object') {
+            this.pingEnabled = { ...prefs }
+            return
+        }
+
+        // fallback to localStorage if config has no prefs yet
+        try {
+            const raw = window?.localStorage?.getItem('profileSelectorPingEnabled')
+            if (raw) {
+                const parsed = JSON.parse(raw)
+                if (parsed && typeof parsed === 'object') {
+                    this.pingEnabled = { ...parsed }
+                }
+            }
+        } catch (e) {
+            console.error('[ProfileSelector] error loading ping preferences from localStorage', e)
+        }
+    }
+
+    #persistPingPreference(profile: PartialProfile<Profile>, enabled: boolean) {
+        const key = this.#profileKey(profile)
+        const store = (this.config.store as any)
+        if (!store.profileSelectorPingEnabled || typeof store.profileSelectorPingEnabled !== 'object') {
+            store.profileSelectorPingEnabled = {}
+        }
+        store.profileSelectorPingEnabled[key] = enabled
+        this.config.save().catch((e) => console.error('[ProfileSelector] error saving ping preference', e))
+
+        try {
+            window?.localStorage?.setItem('profileSelectorPingEnabled', JSON.stringify(store.profileSelectorPingEnabled))
+        } catch (e) {
+            console.error('[ProfileSelector] error saving ping preferences to localStorage', e)
+        }
     }
 
     #schedulePing(profile: PartialProfile<Profile>) {
@@ -655,7 +723,7 @@ export class ProfileSelectorComponent extends BaseTabComponent implements OnInit
 
             exec(cmd, { windowsHide: true }, (error, stdout) => {
                 const out = String(stdout ?? '')
-                const match = out.match(/(?:time|temps)[=<]\s*(\d+(?:[.,]\d+)?)\s*ms/i)
+                const match = out.match(/(?:time|temps)\s*[=<:]*\s*(?:<\s*)?(\d+(?:[.,]\d+)?)\s*ms/i)
                 const timeMs = match ? Math.round(parseFloat(match[1].replace(',', '.'))) : null
                 resolve({ ok: !error, timeMs })
             })
